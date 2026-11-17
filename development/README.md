@@ -6,21 +6,29 @@ evaluation command; `development/main.py` remains a diagnostic viewer.
 
 ## The submission
 
-The submitted labels are written by one command, run in `development/` (data found as described
-in `config/config.yaml`, or via `MTAH_DATA_DIR`):
+The submitted file `tiki-taKA.csv` is `development/outputs/BAR-ATH_baseline.csv`, renamed. It is
+written by one command, run in `development/`, in the environment that produced it - Python
+3.10.12 on Linux, every package pinned in `development/requirements-submission.lock`:
 
 ```bash
+python3.10 -m venv development/.venv
+development/.venv/bin/python -m pip install -r development/requirements-submission.lock
 cd development
-.venv/bin/python -m src.baseline        # -> development/outputs/BAR-ATH_baseline.csv
+MTAH_DATA_DIR=/path/to/the/match/data .venv/bin/python -m src.baseline   # -> outputs/BAR-ATH_baseline.csv
 cd ..
 development/.venv/bin/python evaluation/validate_submission.py development/outputs/BAR-ATH_baseline.csv
 ```
+
+The data are looked up as described in `development/config/config.yaml` (`<dir>/tactical/...`,
+`<dir>/broadcast/...`), or below `MTAH_DATA_DIR`. Parsed tracking and the broadcast alignment are
+cached next to the data; a cold run takes a few minutes.
 
 Submitted configuration (`development/config/config.yaml`): `baseline.dead: gap` (dead ball from
 the long tactical ball gaps judged by the players' pace, `src/stoppages.py`, with the restart
 recognition of `src/restarts.py` and the crowd episodes of `src/dead_ball.py` as cues) and
 `baseline.possession: stefan` (`src/possession_model.py`: control within 3 m and 1 m nearer than
-every opponent, a change after 0.6 s), team shape off. This is the chain of `run_pipeline.py`.
+every opponent, a change after 0.6 s), team shape off. `run_pipeline.py` in the repository root
+runs the same chain and adds a run report.
 
 Further configurations, built and compared on Metrica's labelled sample matches
 (`python -m src.benchmark --variants`) but not submitted: `baseline.dead: evidence` (per stoppage
@@ -30,7 +38,8 @@ the logic with the richer data there; level with `gap` on the sample matches), `
 ## Setup and run
 
 Run from the repository root. The checks below used Python 3.14.6 on Linux; every
-installed dependency is pinned in `requirements-dev.lock`. The dependency-light scorer
+installed dependency is pinned in `requirements-dev.lock`. The submitted file itself was produced
+with Python 3.10.12 and `development/requirements-submission.lock` (see *The submission*). The dependency-light scorer
 requirements are unchanged.
 
 ```bash
@@ -180,16 +189,15 @@ perfect stoppages would add 0.03-0.05, perfect team calls in live play 0.24-0.41
 
 ## Validation
 
-- 187 synthetic tests (no licensed data) cover loading and frame contracts, cache
+- Synthetic tests (no licensed data) cover loading and frame contracts, cache
   invalidation (data, parser and corruption), synchronization gates, gap verdicts,
   keeper holds, Smart Tagging parsing and fallibility, pre-kickoff and half boundaries,
   interruption bridging, restart teams, retention, the external-data loader and labels,
   the noise model, team shape, and end-to-end prediction.
 - The official validator accepts the file; warm, repeated and cold-cache runs are
-  byte-identical (SHA-256 `9664234e607003b89049400e8c3d152631e609ff2125ba37769bef61287cf956`).
-- Label-free full-match diagnostics: 41.9% of graded frames dead in 143 stoppages (about
-  61 min of play in 104), 348 predicted possessions, 230 graded `X` frames, the two
-  kickoffs taken by opposite teams.
+  byte-identical. Compare a rebuilt file with the submitted one by `sha256sum`.
+- Label-free full-match diagnostics of the submitted file: 41.8% of graded frames dead in 141
+  stoppages, 346 predicted possessions, the two kickoffs taken by opposite teams.
 
 ## Public correctness check (descriptive only)
 
