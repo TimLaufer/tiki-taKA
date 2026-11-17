@@ -1,0 +1,212 @@
+# Relative paths are resolved against development/.
+data:
+  # Sensitive competition data - never copy into this repo or commit it.
+  # The environment variable MTAH_DATA_DIR overrides this path.
+  # Files are looked up as <dir>/<source>/<game>_<source>_atd.xml/.txt (DATA.md),
+  # else searched for anywhere below <dir>. To force a path, set (relative to dir)
+  #   metadata_file: <path to the .xml>
+  #   raw_file: <path to the .txt>
+  #   smart_tagging_file: <path to the smart-tagging .xml>
+  # prepare_data.py unpacks the downloads into ../data. Data kept elsewhere (Tim:
+  # ../competition_data/data): set MTAH_DATA_DIR to its absolute path, or run_pipeline.py --data-dir.
+  dir: ../data
+  fallback_dirs: [../competition_data/data]   # used when dir does not exist (Tim's local layout)
+  # Parsed tracking (.npz) is cached here: next to the data, outside the repo.
+  cache_dir: ../competition_data/cache
+  game: BAR-ATH
+  source: tactical   # tactical = the submission timeline; broadcast is not synchronised
+
+fps: 25
+pitch: [105.3, 68.0]   # metres, as measured in the official games.py
+
+# Match phases in video frames, first and last inclusive (DATA.md, FAQ.md). They must
+# cover every frame without gaps. graded = scored by the evaluation; half = 0 outside play.
+# clock_start_min = the match clock at the phase's first frame (its kickoff), in minutes.
+phases:
+  - {name: pre_match,               first: 0,      last: 11184,  half: 0, graded: false}
+  - {name: first_half,              first: 11185,  last: 90651,  half: 1, graded: true, clock_start_min: 0}
+  - {name: halftime,                first: 90652,  last: 110807, half: 0, graded: false}
+  - {name: second_half_pre_kickoff, first: 110808, last: 113741, half: 2, graded: true}
+  - {name: second_half,             first: 113742, last: 190197, half: 2, graded: true, clock_start_min: 45}
+  - {name: post_match,              first: 190198, last: 199318, half: 0, graded: false}
+
+# Broadcast offsets are computed from tracking and cached; no manual alignment constants.
+
+# Cleaning the player tracks (src/player_cleaning.py), inside the halves
+players:
+  max_gap_s: 10.0          # bridge a lost player for up to this long (players move slower than the ball)
+  max_speed_ms: 7.0        # ... where he can have got to in the time: at most this fast ...
+  slack_m: 2.0             # ... plus this much tracking error
+  switch_penalty_m: 2.0    # prefer the same track picking up again over a new one
+  from_video_2: true       # fill in players still missing from the broadcast where it shows the moment live
+  per_team: 11             # fill a team up to this many players on the pitch
+  extra_slots: 5           # per team, for the players from video 2
+  match_radius_m: 3.0      # a broadcast player this close to a tactical one of his team is that player
+
+# The goalkeeper model (src/goalkeeper.py): one keeper per team in every frame of the halves,
+# the deepest player of his team, never beyond his own half
+goalkeeper:
+  margin_m: 5.0           # the deepest player in his own box is the keeper if this much deeper than the next
+  fallback_depth_m: 5.0   # unseen he stays where last seen; never seen in a half: this far in front of his goal
+
+# Merging the ball of both videos (main.py)
+merge:
+  min_gap_s: 5.0          # take video 2 only in gaps of video 1 longer than this; shorter ones are interpolated
+                          # (keep it equal to ball.max_gap_s, so that every gap is either filled or interpolated)
+  check_players: true     # use a broadcast frame only where its players match the tactical ones at that moment
+  max_player_rms_m: 3.0   # ... within this typical distance (live play matched at about 1 m, replays do not)
+  min_players: 4          # ... with at least this many players to compare (else it cannot be checked)
+
+# Broadcast <-> tactical synchronisation (src/broadcast_sync.py)
+sync:
+  enabled: true
+  min_matches: 10
+  min_agreement: 0.85      # robust majority of sampled live configurations
+  max_slope_error: 0.0005 # reject significant clock drift; this merge uses translations only
+  samples: 400                 # broadcast frames to match, spread evenly over the usable ones
+  sequence_s: [0, 1, 2]        # match each frame together with the frames 1 s and 2 s later
+  min_players: 8               # a usable broadcast frame shows at least this many players on the pitch
+  max_reprojection_error: 3.0  # broadcast homography quality, lower is better; invalid frames are never used
+  coarse_step: 5               # search every 5th tactical frame first, then frame by frame around the best
+  cap_m: 5.0                   # a broadcast player further than this from every tactical one counts as 5 m
+  drop_worst: 0.05             # drop this share of the worst matches before estimating the offset
+  tolerance_s: 0.5             # a match agrees with the offset if it is this close
+
+# Dead-ball indicators from the players (src/dead_ball.py). First guesses to look at, not tuned.
+dead_ball:
+  radius_m: 10.0          # crowd = the most players within this distance of one player (that one included)
+  speed_window_s: 0.4     # player speed from the positions this long before and after
+  smooth_s: 1.0           # rolling median for the plot and the episodes
+  crowd_min_players: 12   # an episode: at least this many players within radius_m ...
+  min_duration_s: 3.0     # ... for at least this long
+  top: 25                 # list this many episodes, the densest first
+  # the long gaps of the merged ball (longer than ball.max_gap_s): evidence for a dead ball
+  slow_speed_ms: 1.5      # players walking: median player speed in the gap at most this (walking is ~1.4 m/s)
+  line_margin_m: 1.5      # a ball this close to a line counts as on it (tracking is good to about a metre)
+
+# Ordered shifts: a team moving as a block, P_i(t) = P_i(t0) + c(t) (src/block_shift.py). First guesses.
+block:
+  window_s: 2.0           # compare the positions this far apart, centred on the frame
+  min_shift_m: 3.0        # a block shift moves the team at least this far in the window ...
+  min_rigidity: 0.7       # ... with the players keeping their places: shift / (shift + spread)
+  min_players: 7          # ... comparing at least this many players (tracked at both ends)
+  min_ball_move_m: 3.0    # follows_ball only where the ball moved at least this far in the window
+  smooth_s: 1.0           # an episode: block shift in at least half of the frames around ...
+  min_duration_s: 2.0     # ... for at least this long
+
+# Restarts (src/restarts.py): the ball lies still, then is played - the taker's team has it
+restarts:
+  still_speed_ms: 1.5     # the ball lies still: its speed (rolling median) at most this ...
+  smooth_s: 0.4           # ... over this long
+  min_still_s: 1.0        # a candidate: the ball still at least this long, then played
+  corner_radius_m: 2.5    # a corner: the ball this close to a corner flag
+  spot_radius_m: 1.5      # kickoff / penalty: this close to the centre / penalty spot
+  line_margin_m: 1.5      # throw-in / goal line: this close to the line (tracking is good to about a metre)
+  out_margin_m: 3.0       # further beyond a line, the ball waits off the pitch: no restart yet
+  max_player_out_m: 5.0   # people further outside the lines (bench, warming up) are no takers
+  # a candidate is a restart only if it lasts long enough, the opponents stand back and the players slow down
+  min_duration_s: {throw-in: 2.0, free kick: 3.0, corner: 3.0, goal kick: 3.0, penalty: 3.0, kickoff: 1.0}
+  # the laws: 2 m at a throw-in, 9.15 m at the others - less here, for the tracking and quick restarts
+  opponents_back_m: {throw-in: 1.5, free kick: 3.0, corner: 4.0, goal kick: 6.0, penalty: 6.0, kickoff: 6.0}
+  stoppage_speed_ms: 2.0  # the players' median speed over the still stretch at most this (walking ~1.4 m/s)
+  # a free kick has a foul before it: an opponent of the taker at the ball - in the build-up they stay away
+  before_s: 10.0          # look this far back from where the ball comes to rest ...
+  duel_m: 2.0             # ... for an opponent this close to the ball (null: no such check)
+  # a penalty only with its scene, over the last penalty_check_s before the kick: ...
+  penalty_check_s: 2.0
+  penalty_box_max: 1      # ... at most this many players in the box besides the keepers (the taker) ...
+  penalty_spread_ms: 1.0  # ... and the players not moving off the ball faster than this (a keeper's throw-out)
+  # a throw-in whose ball is not seen: a player standing still behind a touchline (the thrower) ...
+  thrower_behind_m: 0.3   # ... at least this far behind it ...
+  ball_near_m: 5.0        # ... the ball, where seen, no further than this from him ...
+  back_on_s: 3.0          # ... and back on the pitch within this long after the throw
+  check_s: 2.0            # the public ground truth after the restart, this long (understanding only)
+
+# The match cut at the dead balls (src/segments.py), and who has the ball when play resumes
+segments:
+  merge_s: 1.0            # dead-ball events (restarts, dead gaps) this close together are one
+  after_s: 3.0            # possession after a restart: from the moment the ball is played, this long ...
+  control_m: 2.0          # ... over the frames in which a player is this close to the ball: his team, by majority
+  before_s: 3.0           # possession before: the same over this long before play stopped
+  catch_m: 2.0            # a long ball gap that begins at a keeper this close (and not out of play): he holds it - play
+  # ... or that ends with the ball in flight out of a penalty box: run back along its flight ...
+  catch_look_s: 0.24      # ... measured over this long after it turns up ...
+  catch_pass_min_ms: 5.0  # ... at least this fast (a pass) ...
+  catch_back_m: 60.0      # ... the first box within this far back along it: its keeper played it
+  # where play stopped, looking back from where the ball comes to rest (never past the event before) ...
+  max_lookback_s: 60.0    # ... at most this far
+  out_margin_m: 1.5       # ... the ball out: this far beyond a line (the tracking error of the ball, as stoppages) ...
+  out_min_s: 0.4          # ... for at least this long - the first frame of it ...
+  rejoin_s: 3.0           # ... stretches out less than this apart are one (the ball fetched along the line) ...
+  max_out_gap_s: 15.0     # ... if the ball comes to rest at most this long after it was last out
+  slow_speed_ms: 1.5      # else: the players walk (median speed at most this) up to the rest ...
+  reaction_s: 1.0         # ... play stopped this long before they started to (the whistle)
+  smooth_s: 1.0           # the players' speed as a rolling median over this long
+
+# A first labelling of every frame (src/baseline.py): D in the dead balls, possession changes on control
+# The labelling of every frame (python -m src.baseline). THE SUBMISSION is exactly these settings:
+#   dead: gap, possession: stefan, and model / stoppages / team_shape (enabled: false) as set above.
+# Everything else below is a further configuration we built and compared (src.benchmark), not submitted.
+baseline:
+  possession: stefan      # SUBMITTED. stefan = src/possession_model.py (settings under model); ours = Tim's first rule below
+  dead: gap               # SUBMITTED. Which dead balls:
+                          #   gap      = src/stoppages.py: long ball gaps judged by the players' pace (chosen on other games)
+                          #   evidence = per stoppage the logic with the richer data there (level with gap on other games)
+                          #   restart  = src/segments.py: restarts, where play stopped, keeper catches
+                          #   union    = dead where either says so;  combined = both judged per kind of restart
+  control_m: 1.0          # possession: ours only - a team controls the ball: one of its players this close ...
+  switch_s: 2.0           # ... possession changes when the other team does so for longer than this without a break
+
+# Metrica's smart tagging (src/smart_tagging.py), checked against the tracking: is a set piece really there?
+# The public 5-minute ground truth of the official repository: drawn for understanding only,
+# never to tune on (RULES.md). Relative to development/.
+public_gt: ../evaluation/gt/BAR-ATH_possession_gt_public.csv
+
+# Ball analysis (src/ball_analysis.py)
+ball:
+  max_gap_s: 5.0        # fill gaps up to this long on the straight line between the two sightings
+  max_speed_ms: 40.0    # a sighting that jumps away faster is a false detection (hardest shots ~35 m/s)
+  velocity_window: 2    # velocity from the positions 2 frames before and after (0.16 s)
+
+# Physical/time-scale assumptions, exercised on synthetic cases, not public labels.
+model:
+  control_radius_m: 3.0       # playable reach including tracking error
+  control_margin_m: 1.0       # require separation from the opposing team's nearest player
+  control_max_speed_ms: 12.0  # a fast pass near a player does not establish control
+  confirmation_s: 0.6        # sustained evidence, rejecting a brief touch or deflection; 0.4 -> 0.6 after
+                             # validation on Metrica's labelled sample games (src/benchmark.py)
+  out_min_s: 0.4             # reject one-frame out-of-pitch glitches
+  smoothing_half_window_s: 0 # state transitions already have persistence; do not shift them again
+  # No unseen-ball expiry: the owner keeps the ball until the other team's control is
+  # confirmed or play stops (CHALLENGE.md). Abstaining would only repeat the same label.
+
+# Stoppages (src/stoppages.py): long gaps of the tactical ball (> ball.max_gap_s; the export
+# has practically no gaps between 1 s and 5 s) judged by the players' pace. Fixed from
+# football quantities and unlabelled input analysis, before any check against labels.
+stoppages:
+  walking_speed_ms: 1.5   # players' median speed at most walking pace (~1.4 m/s): play is stopped
+  slow_speed_ms: 2.0      # slow but not walking: a stoppage only with one more cue (= restarts.stoppage_speed_ms)
+  bridge_s: 0.0           # join walking-pace visible interruptions shorter than this into the stoppages around
+                          # them; 0 = off: on labelled sample games they were mostly real play (src/benchmark.py)
+  seed_window_s: 1.0      # the restarting team is read off the first ball seen within this long
+
+# Team shape (src/team_shape.py): optional stage. The team in possession spreads out, advances
+# and runs less; its shape follows a change of possession about 3 s later (measured on the
+# pipeline's own turnovers), so it only vetoes or fills, never times a change.
+team_shape:
+  enabled: false
+  lag_s: 3.0              # the teams react about this long after a change of possession ...
+  settle_s: 2.0           # ... and are judged over at least this much longer
+  veto_below: 0.2         # a possession whose winner the shape gives less than this goes back
+
+# Smart Tagging (src/smart_tagging.py): automatic, fallible. Only its SET PIECES intervals
+# are used, as one corroborating cue for a slow long gap; a tag never decides alone.
+smart_tagging:
+  enabled: true
+  tolerance_s: 1.0        # the tags are accurate to about a second (DATA.md)
+  # checking the tags against the tracking (python -m src.smart_tagging, viewer --tags):
+  margin_s: 3.0           # our still ball counts for a tag if played this close to the tag's interval
+  smooth_s: 1.0           # the marks of the set pieces as a rolling mean over this long
+  line_band_m: 2.0        # throw-in mark: players this close to a touchline, or beyond it
+  confirm_pct: 0.9        # confirmed: the mark peaks above this share of all equally long moments of the halves ...
+  contradict_pct: 0.5     # ... contradicted: below this share, and no still ball of ours of that kind

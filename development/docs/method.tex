@@ -1,0 +1,242 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[a4paper,margin=1.35cm,top=1.1cm,bottom=1.1cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\setlist{nosep,leftmargin=1.1em}
+\titleformat{\section}{\normalsize\bfseries}{\thesection}{0.5em}{}
+\titleformat{\subsection}{\small\bfseries}{\thesubsection}{0.5em}{}
+\titlespacing*{\section}{0pt}{5pt}{1.5pt}
+\titlespacing*{\subsection}{0pt}{3pt}{1pt}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{1.5pt}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\pagestyle{empty}
+
+\begin{document}
+
+{\large\bfseries Ball possession from automatic tracking: stoppages first, then persistent control}\\[1pt]
+{\small More than a Hack 2027, Phase~1 (FC~Barcelona vs Athletic Club). The implemented method, not planned work.}
+
+\section{Inputs, training and validation data}
+The tactical automatic tracking (players and ball) defines the timeline: submission frame $i$ is tracking record $i{+}1$. Also
+used: the published phase table (halves, graded frames, kickoffs), the broadcast tracking and homography (aligned in Sec.~3), and
+the \emph{set-piece} intervals of the automatic Smart Tagging, as fallible corroboration only. Video pixels are not used.
+\textbf{No model is trained on labels.} The optional team-shape stage (Sec.~7, not used for the submission) is fitted per match
+on the pipeline's own unambiguous frames, i.e.\ algorithmic pseudo-labels. \textbf{Validation data:} Metrica's three open sample
+matches (anonymised; same provider, formats and 25\,fps; events annotated by Metrica, about 95 graded minutes each), used only to
+compare settings (Sec.~9). No human labels, events or corrected tracking of the challenge match are used; its public labels
+served only the final check.
+
+\section{Pipeline overview}
+One command runs these stages in order; all are deterministic and none reads a label.
+\begin{center}\small\vspace{-4pt}
+\begin{tabularx}{\linewidth}{@{}l>{\raggedright\arraybackslash}p{0.47\linewidth}Y@{}}
+\toprule
+stage & what it does & output \\
+\midrule
+1 load and check & parse both tracking exports; enforce frame order, frame rate and the phase table; content-keyed caches & players and ball per frame, in metres \\
+2 synchronize & one broadcast offset per half, from player layouts (Sec.~3) & offsets, quality figures \\
+3 clean players & bridge lost tracks, complete missing players from the live broadcast, one goalkeeper slot per team & players per frame \\
+4 ball & drop impossible jumps, bridge gaps up to 5\,s, fill longer gaps from the live broadcast; also keep the tactical ball alone & two ball tracks \\
+5 stoppages & judge every long tactical ball gap, add other dead-ball evidence (Sec.~4) & dead / live per frame \\
+6 restarts & team of each restart, keeper holds (Sec.~5) & restart team per live stretch \\
+7 possession & control evidence and the possession state machine (Sec.~6) & H, A, D or X per frame \\
+8 (optional) team shape & veto and fill (Sec.~7); off for the submission & revised labels \\
+9 write and check & official validation before and after writing; report with input/code hashes & submission, report \\
+\bottomrule
+\end{tabularx}\vspace{-4pt}
+\end{center}
+
+\section{Preprocessing and synchronization}
+Every tracking frame must occur once and in order; incomplete coordinates count as missing; positions are in metres
+($105.3\times68$\,m). Lost player tracks are bridged for up to 10\,s if the player could have run the distance (7\,m/s plus 2\,m
+slack); missing players are completed from the broadcast where its player layout matches the tactical one; each team keeps one
+goalkeeper slot (the marked keeper track, else the clearly deepest player in his own box, else his last position, which is never
+used as evidence). Single ball detections implying jumps above 40\,m/s are discarded; ball gaps up to 5\,s are bridged linearly,
+for continuity only (an interpolated ball never establishes control). \emph{Synchronization:} one frame offset per half, from
+400 evenly spaced broadcast frames with a valid homography (reprojection error at most 3) and at least 8 players, each matched to
+the tactical frame whose same-team player positions fit best over 0, 1 and 2\,s; accepted only with at least 10 matches, 85\% of
+them within 0.5\,s of the median offset, and a clock slope within $5\cdot10^{-4}$ of 1 (obtained: 99.5\%/98.4\%, slope 0.99998).
+The broadcast ball fills tactical gaps longer than 5\,s only where the broadcast shows the moment live: valid homography and at
+least 4 players matching the tactical ones within 3\,m RMS (replays fail this check).
+
+\section{Dead ball (D)}
+\emph{Label-free observation.} The tactical ball track has gaps either below 1\,s or of 5\,s and more. The long gaps cover about
+40\% of the graded frames, the usual out-of-play share; during them the players' median speed is about 1\,m/s (87\% of the
+frames at walking pace, against 1.6\,m/s with the ball visible), the broadcast usually cuts away, and tagged set pieces begin
+shortly before they end. Metrica's labelled sample matches show the same convention: the ball is present in 91--97\% of live
+frames but in 0--8\% of dead ones. \emph{Rules.} Each tactical ball gap of 5\,s or more is judged on the tactical ball itself,
+before any broadcast filling (a ball glimpsed by the broadcast during a stoppage must not hide it):
+\begin{itemize}
+\item \textbf{goalkeeper hold} (live): the same goalkeeper controls the ball (as in Sec.~6) where it vanishes and where it
+      reappears, and it was not last seen at a line; the ball is in play (Law~12) and his team possesses it;
+\item \textbf{dead}: the ball was last seen out of play; or the players' median speed over the gap is at most walking pace
+      (1.5\,m/s); or at most 2.0\,m/s with one further cue (last seen at a line, reappearing at a restart spot, at least 12
+      players within 10\,m for 3\,s, or a tagged set piece whose interval contains the restart, $\pm$1\,s). A tag never decides alone;
+\item otherwise \textbf{live}: play continues unseen, and the owner is kept.
+\end{itemize}
+Also dead: the observed ball more than 1.5\,m beyond a line for at least 0.4\,s; the wait before a detected placed-ball restart
+(Sec.~5); graded frames before a half's kickoff (Law~8; the kickoff is where the published phase table starts the clock). On the
+challenge match 109 of 130 long gaps are judged dead (92 by walking pace, 13 by the ball out, 4 corroborated), 6 are goalkeeper
+holds and 15 stay live; 42\% of the graded frames are dead, in 143 stoppages.
+
+\subsection{Bridging (implemented and tested, off for the submission)}
+After the rules above, a live stretch can lie between two stoppages. \textbf{Bridging} would relabel such a stretch as dead when
+it is shorter than 5\,s and the players' median speed over it stays at walking pace: the idea was that the tracker had only
+glimpsed the ball during one long stoppage (a player picking it up for a throw-in) and play never restarted. \textbf{Without
+bridging} the stretch stays live: it is a restart, gets a restart team (Sec.~5) and becomes a short possession. On the challenge
+match bridging would join 29 such stretches (1{,}972 frames, 2.7\,s on average) into 114 instead of 143 stoppages. On the
+labelled matches these stretches were mostly real play---a quick throw-in or free kick followed by the next stoppage, taken
+while the players had not yet accelerated---and bridging lowered spellF1 by 0.008--0.012 in all four conditions, winning in
+only 1 of 12 match--condition pairs (Sec.~9). It therefore stays available as a setting but is off.
+
+\section{Restarts}
+Each live stretch begins with a restart, whose team possesses the ball until the other team's control is confirmed:
+\begin{enumerate}
+\item a \emph{detected placed-ball restart}: the ball lies still (rolling median speed at most 1.5\,m/s) for at least 1\,s and is
+      then played; its location gives the kind (corner within 2.5\,m of a flag, goal kick in a goal area, throw-in on a touchline,
+      kickoff or penalty at the spot, else free kick); it is accepted if it lasts long enough for its kind (1--3\,s), the nearest
+      opponent stands back (1.5\,m at a throw-in, 3--6\,m at the others; the laws ask 2 and 9.15\,m), the players are slow (at
+      most 2\,m/s), the taker stands within 3\,m and the ball then moves. Its taker's team restarts; the still stretch is dead;
+\item else the \emph{first ball seen within 1\,s} of the stretch start: at a corner flag the attacking team, in a goal area the
+      defending team (attack directions from the teams' positions at each kickoff), elsewhere the team of the player in control
+      at the ball (the taker);
+\item else none: the first team whose control is confirmed in the stretch has it from the start.
+\end{enumerate}
+On the challenge match 143 live stretches start as: 18 placed-ball restarts, 6 corners, 12 goal kicks, 64 takers, 43 unknown.
+
+\section{Possession (H/A)}
+A frame carries \emph{control evidence} for a team when the observed (not interpolated) ball moves at most 12\,m/s (where its speed
+is known) and one of the team's players is within 3\,m of it and more than 1\,m nearer than every opponent. Each live stretch is
+decoded left to right:
+\begin{enumerate}
+\item the owner starts as the restart team (Sec.~5), or unknown;
+\item a run of evidence for one team is counted frame by frame; any frame without it, or with the other team's, resets the count;
+\item when the count reaches 0.6\,s (15 frames) for a team that is not the owner, possession changes; the change is dated back to
+      the first frame of the run (the prediction is offline). If the owner was unknown, that team owns the stretch from its start;
+\item otherwise the owner keeps the ball through passes, loose and contested balls, deflections, brief touches and occlusions of
+      any length; a goalkeeper hold gives his team the ball from his catch;
+\item a stoppage or the end of a half ends the stretch. No smoothing follows; X remains only in a stretch whose team is never
+      established (230 of 158{,}857 graded frames; the official scorer repeats the previous label there).
+\end{enumerate}
+
+\section{Optional stage: team shape (off for the submission)}
+The team in possession spreads out, advances and runs less than the team chasing it. Per frame, three home-minus-away
+differences of the outfield players are formed: mean distance to the team centre, speed of the centre towards the opponent goal,
+and median running speed. A logistic model of the team in possession given these differences is fitted per match on the frames
+where the owning team's player has the ball at his feet (in-sample AUC about 0.88 on the challenge match). Shape follows a change
+of possession only about 3\,s later, so it never times a change; it judges one. \textbf{Veto:} a possession won in open play that
+lasts at least 5\,s, but whose part from 3\,s after its start the model gives its winner a probability below 0.2, is returned to
+the previous owner. \textbf{Fill:} unattributed frames take the team the shape gives at least 0.8. On the challenge match it would
+veto 7 possessions and change 0.8\% of the graded frames; on the validation matches it gave no consistent gain (Sec.~9).
+
+\section{Recommended settings (submitted)}
+These are the values in the configuration that produced the submitted file; ``measured'' means fixed from label-free statistics
+of the challenge input, ``validated'' means compared on the labelled sample matches (Sec.~9).
+\begin{center}\small\vspace{-4pt}
+\begin{tabularx}{\linewidth}{@{}lrY@{}}
+\toprule
+setting & value & basis \\
+\midrule
+long ball gap (stoppage candidate; also the interpolation limit) & 5\,s & measured: no gaps between 1 and 5\,s \\
+walking pace / slow pace (median player speed) & 1.5 / 2.0\,m/s & walking speed 1.4\,m/s; validated (1.2 and 1.8 change nothing) \\
+ball beyond a line before it counts as out & 1.5\,m for 0.4\,s & tracking error about 1\,m; rejects one-frame glitches \\
+bridging of short walking-pace stretches & off & validated (Sec.~4.1) \\
+restart team window & 1\,s & validated: without restart teams spellF1 drops 0.04--0.05 \\
+control radius / margin over the nearest opponent & 3\,m / 1\,m & reach plus tracking error; validated under realistic noise \\
+maximum ball speed for control & 12\,m/s & a fast pass near a player is not control \\
+confirmation of a change of possession & 0.6\,s & validated (0.4\,s before; 0.2 and 1.2\,s worse) \\
+broadcast synchronization and completion & on & offsets computed and gated (Sec.~3) \\
+Smart Tagging set pieces & on, $\pm$1\,s & corroboration only; decides no gap alone \\
+team-shape stage & off & validated: no consistent gain \\
+\bottomrule
+\end{tabularx}\vspace{-4pt}
+\end{center}
+
+\section{Validation on other matches}
+The unchanged pipeline runs on Metrica's three sample matches. Reference labels follow Metrica's event definitions: the team of
+the latest on-ball event has the ball (\emph{touch}); dead from a ball out, goal, offside, foul or referee stop until the next
+on-ball event. A \emph{controlled} variant applies the challenge's proxies: a spell won in open play counts only if it lasts 2\,s
+or contains a completed pass. The sample tracking is corrected (the ball lies about 0.1\,m from its owner), so the benchmark is
+also run with a smooth random ball error (1.15\,m per axis, 3\,s time constant), which reproduces the challenge's distances
+between ball and nearest player (median 1.8\,m) and its ball speeds, both measured without labels. Scores use the official
+metrics: spellF1, mean over the three matches, and in how many of the 12 match--condition pairs a variant beats the submitted
+settings. \emph{Oracle} rows replace one component by the truth.
+\begin{center}\small\vspace{-4pt}
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+variant (one change from the submitted settings) & clean, touch & clean, contr. & noisy, touch & noisy, contr. & better \\
+\midrule
+\textbf{submitted (0.6\,s, 3\,m, 1\,m, no bridging)} & \textbf{0.569} & \textbf{0.659} & \textbf{0.527} & \textbf{0.630} & -- \\
+previous settings (0.4\,s, bridging) & 0.548 & 0.593 & 0.512 & 0.575 & 0 \\
+confirmation 0.2 / 0.4\,s & 0.503 / 0.556 & 0.493 / 0.601 & 0.448 / 0.520 & 0.461 / 0.584 & 0 / 1 \\
+confirmation 0.8 / 1.2\,s & 0.559 / 0.518 & 0.676 / 0.649 & 0.497 / 0.446 & 0.625 / 0.573 & 5 / 0 \\
+control radius 1.5 / 2\,m & 0.545 / 0.561 & 0.673 / 0.673 & 0.414 / 0.465 & 0.531 / 0.583 & 3 / 3 \\
+control radius 2.5 / 4\,m & 0.569 / 0.551 & 0.673 / 0.623 & 0.508 / 0.526 & 0.617 / 0.618 & 5 / 3 \\
+margin 0.5 / 2\,m & 0.585 / 0.536 & 0.657 / 0.661 & 0.520 / 0.476 & 0.596 / 0.611 & 5 / 2 \\
+walking pace 1.2 / 1.8\,m/s & 0.568 / 0.569 & 0.658 / 0.659 & 0.524 / 0.527 & 0.627 / 0.629 & 0 / 0 \\
+bridging 5\,s & 0.560 & 0.651 & 0.517 & 0.618 & 1 \\
+no restart teams & 0.525 & 0.620 & 0.485 & 0.585 & 0 \\
+team shape (veto 0.2; 0.1 / 0.3 similar or worse) & 0.563 & 0.652 & 0.529 & 0.633 & 7 \\
+\midrule
+oracle dead ball / oracle team & 0.608 / 0.919 & 0.711 / 0.900 & 0.554 / 0.933 & 0.663 / 0.924 & 12 / 12 \\
+\bottomrule
+\end{tabular}\vspace{-4pt}
+\end{center}
+The submitted settings beat the previous ones in all 12 pairs. No single change beats them in more than 7 of 12 pairs: smaller
+radii or margins and 0.8\,s win only in some clean-data conditions (1.5\,m would lose about 0.1 with realistic noise), and team
+shape gains 0.002--0.003 with noise but loses 0.006--0.007 on clean data, too little and too mixed to switch it on. The oracles locate the remaining error: perfect stoppages would add 0.03--0.05, perfect team calls in
+live play 0.24--0.41.
+
+\section{Tests and reproduction}
+187 synthetic tests (no licensed data needed) cover, by area:
+\begin{center}\small\vspace{-4pt}
+\begin{tabularx}{\linewidth}{@{}lrY@{}}
+\toprule
+area & tests & what is checked \\
+\midrule
+loading, frames, caches & 40 & frame IDs repeated, unordered or out of range; partial coordinates; phase table coverage; cache invalidated by content, parser or corruption; archive unpacking \\
+synchronization & 12 & matching by player layout, offsets per half, replay rejection, quality gates (agreement, slope, matches) \\
+players, keepers, ball & 34 & track bridging, broadcast completion, keeper placement, false detections, gap filling, speeds \\
+stoppages and restarts & 45 & gap verdicts, goalkeeper hold, Smart Tagging never deciding alone, out-of-pitch runs, pre-kickoff, bridging on/off and never across halves, restart kinds and teams, judged on the tactical ball \\
+possession model & 20 & retention through occlusion, confirmation dated back, restart and keeper teams, half resets, end to end \\
+validation data, team shape & 13 & event-to-label rules (goal kick is no goal, ball lost, fouls), controlled labels, noise reproducibility and size, shape features, fit, veto and fill \\
+viewers and helpers & 23 & plots, tables, progress output \\
+\bottomrule
+\end{tabularx}\vspace{-4pt}
+\end{center}
+\texttt{python run\_pipeline.py -{}-evaluate} (repository root) writes \texttt{outputs/current/submission.csv} (199{,}319 rows,
+officially validated before and after writing) and a report hashing all inputs and sources, saved before any label is read.
+The benchmark is \texttt{python -m src.benchmark -{}-variants} in \texttt{development/}. Warm, repeated and cold-cache runs
+are byte-identical (SHA-256 \texttt{9664234e\ldots f956}); the official validator accepts the file.
+
+\section{Public results, scope and limitations}
+Measured once on the public five minutes (7{,}500 frames, 17 possessions) after the settings were fixed on the validation
+matches; no change followed:
+\begin{center}\small\vspace{-5pt}
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & value & bootstrap 5--95\% \\
+\midrule
+spellF1 (ranking metric) & 0.526 & 0.366--0.663 \\
+macroF1 \quad(per-class F1: H 0.857, A 0.802, D 0.552) & 0.737 & 0.557--0.858 \\
+possessions / mean duration \quad(truth: 17 / 14.2\,s) & 18 / 14.6\,s & \\
+\bottomrule
+\end{tabular}\vspace{-5pt}
+\end{center}
+The previous settings scored 0.544 and 0.739 here. Seventeen possessions cannot rank methods: the scorer treats spellF1 gaps below
+about 0.30 as noise, and by the rules this window may not choose between versions; the choice rests on Sec.~9.
+Most frame errors in the window are dead-ball frames labelled live (D recall 0.45).
+\textbf{Limitations.} (1)~Dead ball comes from when the tracker loses the ball and how the players move: a stoppage starts late
+while the ball stays in view, and unseen slow live play may be taken for one. (2)~Possession changes in live play are the main
+error (Sec.~9): proximity cannot always tell a touch from control, and the best confirmation time depends on how control is
+defined. (3)~The validation labels are event-based proxies on three matches with corrected tracking and simulated ball error.
+(4)~Restart teams fail when the ball reappears in flight; one broadcast offset per half; Smart Tagging teams and phases are unused.
+
+\end{document}
